@@ -4,7 +4,12 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { handle } from "hono/vercel";
 
+export const config = {
+  runtime: "edge",
+};
+
 const TARGET = process.env.TARGET_URL || "http://localhost:8080";
+const TIMEOUT_MS = 30_000; // 30 detik timeout
 
 const app = new Hono().basePath("/api");
 
@@ -12,9 +17,11 @@ app.use("*", cors());
 
 app.all("/*", async (c) => {
   const url = new URL(c.req.url);
-  // Remove /api prefix to get the real path
   const path = url.pathname.replace(/^\/api/, "") || "/";
   const targetUrl = TARGET + path + url.search;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
     const headers = new Headers(c.req.raw.headers);
@@ -24,6 +31,7 @@ app.all("/*", async (c) => {
       method: c.req.method,
       headers,
       redirect: "follow",
+      signal: controller.signal,
     };
 
     if (c.req.method !== "GET" && c.req.method !== "HEAD") {
@@ -31,6 +39,8 @@ app.all("/*", async (c) => {
     }
 
     const response = await fetch(targetUrl, requestInit);
+
+    clearTimeout(timeoutId);
 
     const responseHeaders = new Headers(response.headers);
     responseHeaders.delete("content-encoding");
@@ -42,6 +52,19 @@ app.all("/*", async (c) => {
       headers: responseHeaders,
     });
   } catch (error: any) {
+    clearTimeout(timeoutId);
+
+    if (error.name === "AbortError") {
+      return c.json(
+        {
+          error: "Proxy request timeout",
+          message: `Request to target timed out after ${TIMEOUT_MS / 1000}s`,
+          targetUrl,
+        },
+        504,
+      );
+    }
+
     return c.json(
       {
         error: "Proxy request failed",
